@@ -3,6 +3,9 @@
  * @author Jim McGowen
  */
 const readline = require('node:readline');
+const net = require('net');
+const { ECONNREFUSED } = require('os');
+const sleep = require('system-sleep');
 
 /**
  * A coordinate on the board.
@@ -88,7 +91,9 @@ class BoardOutOfBoundsException extends Error {}
  * The game.
  */
 class Othello {
-  static SIZE = 8;
+  // Size of the game board. Max 26
+  static SIZE = 26;
+
   static DIRECTIONS = [
     'left',
     'left-up',
@@ -103,6 +108,14 @@ class Othello {
   // The game board
   board = null;
   scores = {};
+  multi = false;
+  multiPort = 5150;
+  clientConnected = false;
+  hosting = false;
+  socket = null;
+  multiOpponentMove = null
+  curPlayer = null;
+  multiPlayerColor = null;
 
   /**
    * Validates the size and initializes the game board.
@@ -394,7 +407,7 @@ class Othello {
   }
 
   /**
-   *
+   * Draws the game board and prints the current scores.
    */
   drawBoardAndScores() {
     console.log(this.board.toString());
@@ -418,6 +431,11 @@ class Othello {
     return false;
   }
 
+  /**
+   * Get all the valid moves for the given color.
+   * @param color
+   * @returns {*[]}
+   */
   getAllValidMoves(color) {
     const validMoves = [];
     for (let row = 0; row < Othello.SIZE; row++) {
@@ -429,6 +447,113 @@ class Othello {
     }
 
     return validMoves;
+  }
+
+  /**
+   * Start a multiplayer game. If connectIP is null, become host. Otherwise, connect to the given IP.
+   * If the connection is refused, become host.
+   *
+   * @param connectIP
+   */
+  startMulti(connectIP = null) {
+    this.multi = true;
+
+    try {
+      const startHost = () => {
+        this.multiPlayerColor = this.curPlayer;
+
+        const server = net.createServer((socket) => {
+          console.log('Client connected.\n');
+          this.clientConnected = true;
+
+          this.socket = socket;
+          this.socket.on('data', this.handleServerDataReceived);
+        });
+
+        server.listen(this.multiPort, () => {
+          this.hosting = true;
+          console.log('\nYou are the host. Waiting for client... ');
+        });
+      }
+
+      if (connectIP) {
+        // Connect to host
+        this.socket = net.connect({ port: this.multiPort, host: connectIP }, () => {
+          // We are now a client
+          console.log('\nConnected to host.');
+          this.clientConnected = true;
+        });
+
+        this.socket.on('data', this.handleClientDataReceived);
+
+        this.socket.on('error', (error) => {
+          if (error.code === 'ECONNREFUSED') {
+            console.log(`\nCould not connect to host ${connectIP}. Becoming host instead...`);
+            // On fail become host
+            startHost();
+          } else {
+            console.error('socket error: ', error);
+          }
+        });
+      } else {
+        startHost();
+      }
+    }
+    catch (error) {
+      console.log(error);
+    }
+  }
+
+  /**
+   * Handler for when client received data in multiplayer mode.
+   *
+   * @param data
+   */
+  handleClientDataReceived(data) {
+    //console.log('got data from server: ', data.toString());
+    try {
+      data = JSON.parse(data.toString());
+      if (data.board) {
+        this.board = data.board;
+        this.drawBoardAndScores();
+        console.log('board updated from host.');
+      }
+
+      if (data.curPlayer) {
+        this.curPlayer = data.curPlayer;
+        console.log('curPlayer updated from host.');
+
+        if (this.multiPlayerColor === null) {
+          // Set the client player color to the opposite of the host's
+          this.multiPlayerColor = data.curPlayer === Color.BLACK ? Color.WHITE : Color.BLACK;
+        }
+      }
+
+      if (data.move) {
+        // TODO: Got move from client
+        this.multiOpponentMove = data.move;
+      }
+    } catch (e) {
+      console.error('Bad data: ', data.toString());
+    }
+  }
+
+  /**
+   * Handler for when server received data in multiplayer mode.
+   *
+   * @param data
+   */
+  handleServerDataReceived(data) {
+    console.log('got data from client: ', data.toString());
+    try {
+      data = JSON.parse(data.toString());
+      if (data.move) {
+        // TODO: Got move from server
+        this.multiOpponentMove = data.move;
+      }
+    } catch (e) {
+      console.error('Bad data: ', data.toString());
+    }
   }
 
   /**
@@ -453,21 +578,62 @@ class Othello {
     this.scores = this.getScores();
 
     // Pick first player at random
-    let curPlayer = Math.random() < 0.5 ? Color.BLACK : Color.WHITE;
+    this.curPlayer = Math.random() < 0.5 ? Color.BLACK : Color.WHITE;
 
     let autoPilot = false;
 
+    let stateChanged = true;
+
     while (true) {
       try {
+        if (this.multi && !this.clientConnected) {
+          // Waiting for connection
+          // FIX: sleep breaks the while loop!
+          // Probably need to ditch the while loop in favor of functions getInput and processMove
+          // But how to keep process alive while waiting for the other player???
+          sleep(100);
+          continue;
+        }
+
+        if (this.multi && this.curPlayer !== this.multiPlayerColor && this.multiOpponentMove === null) {
+          if (this.hosting && stateChanged) {
+            // Send client game state to client
+            this.socket.write(JSON.stringify({
+              board: this.board,
+              curPlayer: this.curPlayer
+            }));
+            stateChanged = false;
+          }
+
+          // Waiting for other player
+          // FIX: sleep breaks the while loop!
+          sleep(100);
+          continue;
+        }
+
         // Draw the board
         this.drawBoardAndScores();
 
         let input = null;
+
+        if (this.multi) {
+          input = this.multiOpponentMove;
+          this.multiOpponentMove = null;
+        }
+
         if (!autoPilot) {
           // Wait for input
-          input = await new Promise(res => rl.question(`Enter move for ${curPlayer}: `, res));
+          input = await new Promise(res => rl.question(`Enter move for ${this.curPlayer}: `, res));
+
           if (input === 'autopilot') {
             autoPilot = true;
+          }
+
+          if (input === 'multi') {
+            const ip = await new Promise(res => rl.question(`\nEnter the host's IP address or hostname or blank to become the host: `, res));
+            console.log(ip);
+            this.startMulti(ip);
+            continue;
           }
         }
 
@@ -481,7 +647,7 @@ class Othello {
         if (input === '-' || autoPilot) {
           // Auto move
           // Choose all the valid moves with the most flips
-          const validMoves = this.getAllValidMoves(curPlayer);
+          const validMoves = this.getAllValidMoves(this.curPlayer);
           let bestMoves = [validMoves[0]];
           let bestMove = validMoves[0];
           for (let i = 0; i < validMoves.length; i++) {
@@ -502,33 +668,35 @@ class Othello {
         }
 
         // Check if it's a valid move
-        const closures = this.validateMove(move, curPlayer);
+        const closures = this.validateMove(move, this.curPlayer);
         if (closures === false) {
           console.log('Invalid move. Try again.');
           console.log();
           continue;
         }
 
+        stateChanged = true;
+
         // Place the piece
-        this.board.positions[move.row][move.col] = curPlayer;
+        this.board.positions[move.row][move.col] = this.curPlayer;
 
         // Flip pieces
         for (let i = 0; i < closures.length; i++) {
           const { direction, start, end, flipCount } = closures[i];
-          this.flipPieces(start, end, direction, curPlayer);
+          this.flipPieces(start, end, direction, this.curPlayer);
         }
 
         // Update scores
         this.scores = this.getScores();
 
         // Switch players
-        curPlayer = curPlayer === Color.BLACK ? Color.WHITE : Color.BLACK;
+        this.curPlayer = this.curPlayer === Color.BLACK ? Color.WHITE : Color.BLACK;
 
         // Check if next player has any valid moves
-        if (!this.playerHasAnyValidMoves(curPlayer)) {
-          console.log(`No valid moves for ${curPlayer}.`);
-          curPlayer = curPlayer === Color.BLACK ? Color.WHITE : Color.BLACK;
-          if (!this.playerHasAnyValidMoves(curPlayer)) {
+        if (!this.playerHasAnyValidMoves(this.curPlayer)) {
+          console.log(`No valid moves for ${this.curPlayer}.`);
+          this.curPlayer = this.curPlayer === Color.BLACK ? Color.WHITE : Color.BLACK;
+          if (!this.playerHasAnyValidMoves(this.curPlayer)) {
             this.drawBoardAndScores();
             console.log('No valid moves for either player.');
             if (this.scores.black === this.scores.white) {
@@ -541,6 +709,7 @@ class Othello {
               const percent = (this.scores.white / (this.scores.black + this.scores.white) * 100).toFixed(0);
               console.log('White wins with ' + percent + '% of the board!');
             }
+
             break;
           }
         }
@@ -551,6 +720,8 @@ class Othello {
         } else {
           throw e;
         }
+
+        break;
       }
     }
   }

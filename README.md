@@ -1,10 +1,15 @@
+# Othello
+
 To run:
+
+```npm install```
+
 ```node othello.js```
 
 To play:
-Enter the coordinates of the piece you want to place, e.g. 'a1' or 'h8'.
+Enter the coordinates of the piece you want to place, e.g. `a1` or `h8`.
 
-Rules:
+## Rules
 * Play happens on an 8x8 grid. Game pieces are discs with a black side and a white side. The face-up side of a piece indicates its current owner.
 * The game begins with two black pieces and two white pieces, as shown:
 ```
@@ -51,7 +56,13 @@ Rules:
 
 Notes:
 * You can change the size of the board by editing the following line in othello.js:
-```static SIZE = 8;```
-* The maximum size is 26.
+```static SIZE = 8;``` The maximum size is 26.
+
+## AI
 * You can let the machine play for your by entering a "-" (dash) insead of coordinates.
 * You can let the machine play itself by entering "autopilot" instead of coordinates.
+
+## Multiplayer
+
+* Experimental feature.
+* To start a multiplayer game type "multi"
